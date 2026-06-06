@@ -33,3 +33,7 @@ pnpm-debug.log*
 
 # secrets — never commit
 secrets.md
+
+# Supabase CLI local state
+supabase/.temp/
+supabase/.branches/
