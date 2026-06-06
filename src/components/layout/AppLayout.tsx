@@ -4,6 +4,7 @@ import { useAuth } from '../../contexts/AuthContext'
 import { supabase } from '../../lib/supabase'
 import LoadingScreen from '../ui/LoadingScreen'
 import { LogoMark, Wordmark } from '../ui/Logo'
+import HelpModal from '../modals/HelpModal'
 
 const STONECODE_URL = import.meta.env.VITE_STONECODE_URL || 'https://stonecode.ai'
 
@@ -12,6 +13,7 @@ export default function AppLayout() {
   const navigate = useNavigate()
   const location = useLocation()
   const [signOutHover, setSignOutHover] = useState(false)
+  const [helpOpen, setHelpOpen] = useState(false)
 
   useEffect(() => {
     if (!loading && !session) {
@@ -80,15 +82,17 @@ export default function AppLayout() {
 
           <div className="flex items-center gap-2">
             <button
-              onClick={() => window.location.href = STONECODE_URL + '/portal/dashboard'}
-              title="Back to stonecode.ai portal"
-              className="px-3 py-2 rounded-xl text-sm transition-all hidden sm:flex items-center gap-2"
-              style={{ background: 'transparent', border: '1px solid rgba(255,255,255,0.08)', color: '#9aa6b8', cursor: 'pointer' }}
+              onClick={() => setHelpOpen(true)}
+              aria-label="How Forge works"
+              title="How Forge works (FAQ)"
+              className="w-9 h-9 rounded-xl flex items-center justify-center transition-all"
+              style={{ background: 'rgba(255,255,255,0.04)', border: '1px solid rgba(255,255,255,0.08)', color: '#9aa6b8', cursor: 'pointer' }}
             >
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M19 12H5M12 19l-7-7 7-7" />
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+                <path d="M12 17h.01" />
               </svg>
-              Portal
             </button>
 
             <button
@@ -136,6 +140,8 @@ export default function AppLayout() {
       <main className="relative z-10 flex-1 px-4 sm:px-6 py-8 max-w-6xl mx-auto w-full">
         <Outlet />
       </main>
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   )
 }
