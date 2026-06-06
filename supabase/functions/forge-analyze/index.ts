@@ -1,7 +1,7 @@
 // Forge analyze pipeline.
 //
 // Stages, written to forge_analyses.status + .progress as they run:
-//   pending → researching → analyzing → pricing → complete
+//   pending → researching → auditing → analyzing → pricing → complete
 //
 // Pricing is computed DETERMINISTICALLY from the user's forge_rate_card
 // (hourly_rate × dev_hours × tier_multiplier), not by the LLM.
@@ -37,6 +37,27 @@ Use web search aggressively. Search for:
 - Industry trends, regulatory pressures, AI-disruption vectors in their sector
 
 You produce a STRICTLY REALISTIC, data-driven research dossier targeted at SMBs with LIMITED budgets and resources. No fluff, no consultant-speak. Every claim should be grounded in something you actually found. If a fact is unknown, say so — never fabricate funding numbers, headcount, customers, or dates.
+
+Your FINAL message must be ONLY a single valid JSON object — no preamble, no markdown fencing, no commentary after.`
+
+const AUDIT_SYSTEM = `You are Forge's Digital Presence Auditor — an expert at evaluating an SMB's public-facing digital footprint and identifying concrete, sellable fixes.
+
+You audit FOUR areas and score each 0–100:
+
+1. WEBSITE / UX — Visit their site. Evaluate: clarity of value proposition above the fold, navigation/IA, page speed signals (heavy images, third-party scripts), mobile responsiveness clues, trust signals (testimonials, case studies, certifications), CTAs and conversion paths, accessibility hints (alt text, color contrast cues), copy quality.
+
+2. SEO — Read the homepage source for title/description meta tags, heading hierarchy, schema/structured data, internal linking. Search Google for their name + niche terms to see how visible they are. For local SMBs check Google Business Profile presence and NAP (name/address/phone) consistency. Estimate domain authority qualitatively from search rankings — do NOT invent numeric metrics like DA scores.
+
+3. BRANDING — Logo quality and consistency, color palette, voice/tone consistency, tagline/positioning clarity, visual quality (professional vs amateur), consistency between site / social / reviews.
+
+4. SOCIAL MEDIA — Search for their LinkedIn, X/Twitter, Instagram, Facebook, YouTube, TikTok (whichever are relevant to their sector). For each platform found, note URL, last post recency (active / dormant / absent), brand-consistency, content quality.
+
+CRITICAL STANDARDS:
+- Only state what you actually verified. Do NOT invent page speed milliseconds, DA scores, follower counts, or other numeric metrics you can't observe.
+- Scoring rubric: 90+ = excellent, 70–89 = solid with minor gaps, 50–69 = significant issues, 30–49 = poor, <30 = severely deficient.
+- Each "issue" must be a sellable observation — something an SMB owner would immediately recognize as a fix worth paying for.
+- Each "strength" should be specific (not "good design"; instead "Clear value prop in hero with single CTA").
+- Be calibrated for SMBs — don't penalize a 5-person plumbing company for not having a brand book.
 
 Your FINAL message must be ONLY a single valid JSON object — no preamble, no markdown fencing, no commentary after.`
 
@@ -105,6 +126,42 @@ interface AnalysisJson {
     threats: { point: string; detail: string }[]
   }
   optimization_matrix: OptimizationMatrixRaw[]
+}
+
+interface AuditAreaRaw {
+  score?: number
+  strengths?: string[]
+  issues?: string[]
+  notes?: string
+}
+
+interface SocialPlatformRaw {
+  name?: string
+  url?: string
+  status?: 'active' | 'dormant' | 'absent' | 'unknown'
+  notes?: string
+}
+
+interface SocialAreaRaw {
+  score?: number
+  platforms?: SocialPlatformRaw[]
+  issues?: string[]
+  notes?: string
+}
+
+interface PriorityFixRaw {
+  title?: string
+  area?: 'website' | 'seo' | 'branding' | 'social'
+  impact?: 'High' | 'Medium' | 'Low'
+  effort?: 'Low' | 'Medium' | 'High'
+}
+
+interface DigitalAuditRaw {
+  website?: AuditAreaRaw
+  seo?: AuditAreaRaw
+  branding?: AuditAreaRaw
+  social?: SocialAreaRaw
+  priority_fixes?: PriorityFixRaw[]
 }
 
 interface RateCardRow {
@@ -224,19 +281,68 @@ Deno.serve(async (req) => {
 
     await supabaseAdmin.from('forge_analyses')
       .update({
-        status: 'analyzing',
+        status: 'auditing',
         progress: 30,
         company_name: clamp(dossier.company_name, 160) || target,
         sources: (dossier.sources ?? []).slice(0, 12).filter((s) => /^https?:\/\//i.test(s?.url ?? '')),
       })
       .eq('id', analysisId)
 
-    /* ── Stage 2: Analyze (SWOT + Matrix) ───────────────────────── */
+    /* ── Stage 2: Digital Presence Audit ───────────────────────── */
+    stage = 'audit'
+
+    const auditPrompt =
+      `Audit this company's public digital presence. Use web search to actually visit their site and their social profiles.\n\n` +
+      `COMPANY: ${dossier.company_name}\n` +
+      `RESEARCH CONTEXT:\n${JSON.stringify({ snapshot: dossier.snapshot, value_proposition: dossier.value_proposition }, null, 2)}\n\n` +
+      `Return ONLY this JSON object:\n` +
+      `{\n` +
+      `  "website": {\n` +
+      `    "score": 72,\n` +
+      `    "strengths": ["..."],\n` +
+      `    "issues": ["specific, sellable fixes"],\n` +
+      `    "notes": "what you actually evaluated"\n` +
+      `  },\n` +
+      `  "seo": { "score": 45, "strengths": ["..."], "issues": ["..."], "notes": "..." },\n` +
+      `  "branding": { "score": 60, "strengths": ["..."], "issues": ["..."], "notes": "..." },\n` +
+      `  "social": {\n` +
+      `    "score": 35,\n` +
+      `    "platforms": [\n` +
+      `      { "name": "LinkedIn", "url": "https://www.linkedin.com/company/...", "status": "active", "notes": "Posts weekly, mostly product updates" },\n` +
+      `      { "name": "X", "url": null, "status": "absent", "notes": "No verifiable account found" }\n` +
+      `    ],\n` +
+      `    "issues": ["..."],\n` +
+      `    "notes": "..."\n` +
+      `  },\n` +
+      `  "priority_fixes": [\n` +
+      `    { "title": "...", "area": "seo|website|branding|social", "impact": "High|Medium|Low", "effort": "Low|Medium|High" }\n` +
+      `  ]\n` +
+      `}\n\n` +
+      `Produce 3-6 priority_fixes drawn from the most impactful issues across all four areas.`
+
+    const auditMsg = await anthropic.messages.create({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 5120,
+      system: AUDIT_SYSTEM,
+      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 } as unknown as Anthropic.Tool],
+      messages: [{ role: 'user', content: auditPrompt }],
+    })
+
+    const auditText = collectText(auditMsg)
+    const auditRaw = (extractJson(auditText) ?? {}) as DigitalAuditRaw
+    const digitalAudit = sanitizeAudit(auditRaw)
+
+    await supabaseAdmin.from('forge_analyses')
+      .update({ status: 'analyzing', progress: 55 })
+      .eq('id', analysisId)
+
+    /* ── Stage 3: Analyze (SWOT + Matrix, informed by audit) ──── */
     stage = 'analyze'
 
     const analyzePrompt =
-      `Produce the full optimization report from this research dossier.\n\n` +
+      `Produce the full optimization report from this research dossier and digital presence audit.\n\n` +
       `RESEARCH DOSSIER:\n${JSON.stringify(dossier, null, 2)}\n\n` +
+      `DIGITAL PRESENCE AUDIT:\n${JSON.stringify(digitalAudit, null, 2)}\n\n` +
       (context ? `ENGAGEMENT CONTEXT: ${context}\n\n` : '') +
       `Return ONLY this JSON object:\n` +
       `{\n` +
@@ -268,7 +374,8 @@ Deno.serve(async (req) => {
       `    }\n` +
       `  ]\n` +
       `}\n\n` +
-      `Produce 6-10 optimization matrix items, well-distributed across tiers (at least 2 in each tier when reasonable). Be honest about effort.`
+      `Produce 6-10 optimization matrix items, well-distributed across tiers (at least 2 in each tier when reasonable). Be honest about effort.\n\n` +
+      `IMPORTANT: Translate the audit's priority_fixes into matrix items where appropriate. SMB-grade SEO/website/branding/social fixes are exactly the kind of quotable, fast-payback work that closes the engagement — represent them concretely.`
 
     const analyze = await anthropic.messages.create({
       model: 'claude-sonnet-4-6',
@@ -309,6 +416,7 @@ Deno.serve(async (req) => {
     const finalReport = {
       exec_summary: parsedAnalysis.exec_summary,
       swot: parsedAnalysis.swot,
+      digital_audit: digitalAudit,
       optimization_matrix: sanitizedMatrix,
       roadmap,
       pricing,
@@ -366,6 +474,56 @@ function adaptReconBriefToDossier(
           .filter((s) => /^https?:\/\//i.test(s.url))
       : [],
   }
+}
+
+function sanitizeAudit(raw: DigitalAuditRaw): {
+  overall_score: number
+  website: { score: number; strengths: string[]; issues: string[]; notes: string }
+  seo: { score: number; strengths: string[]; issues: string[]; notes: string }
+  branding: { score: number; strengths: string[]; issues: string[]; notes: string }
+  social: { score: number; platforms: Array<{ name: string; url?: string; status: 'active' | 'dormant' | 'absent' | 'unknown'; notes: string }>; issues: string[]; notes: string }
+  priority_fixes: Array<{ title: string; area: 'website' | 'seo' | 'branding' | 'social'; impact: 'High' | 'Medium' | 'Low'; effort: 'Low' | 'Medium' | 'High' }>
+} {
+  const cleanArea = (a: AuditAreaRaw | undefined) => ({
+    score: clampScore(a?.score),
+    strengths: strArray(a?.strengths, 8, 280),
+    issues: strArray(a?.issues, 8, 280),
+    notes: clamp(a?.notes, 600),
+  })
+  const website  = cleanArea(raw.website)
+  const seo      = cleanArea(raw.seo)
+  const branding = cleanArea(raw.branding)
+  const platformsRaw = Array.isArray(raw.social?.platforms) ? raw.social!.platforms! : []
+  const platforms = platformsRaw.slice(0, 8).map((p) => ({
+    name: clamp(p?.name, 40) || 'Unknown',
+    url: typeof p?.url === 'string' && /^https?:\/\//i.test(p.url) ? clamp(p.url, 300) : undefined,
+    status: (p?.status === 'active' || p?.status === 'dormant' || p?.status === 'absent') ? p.status : 'unknown' as const,
+    notes: clamp(p?.notes, 240),
+  }))
+  const social = {
+    score: clampScore(raw.social?.score),
+    platforms,
+    issues: strArray(raw.social?.issues, 8, 280),
+    notes: clamp(raw.social?.notes, 600),
+  }
+
+  const fixesRaw = Array.isArray(raw.priority_fixes) ? raw.priority_fixes : []
+  const priority_fixes = fixesRaw.slice(0, 8).map((f) => ({
+    title: clamp(f?.title, 200) || 'Fix',
+    area: (['website', 'seo', 'branding', 'social'].includes(f?.area as string) ? f!.area : 'website') as 'website' | 'seo' | 'branding' | 'social',
+    impact: (f?.impact === 'High' || f?.impact === 'Low' ? f.impact : 'Medium') as 'High' | 'Medium' | 'Low',
+    effort: (f?.effort === 'Low' || f?.effort === 'High' ? f.effort : 'Medium') as 'Low' | 'Medium' | 'High',
+  })).filter((f) => f.title && f.title !== 'Fix')
+
+  const overall_score = Math.round((website.score + seo.score + branding.score + social.score) / 4)
+
+  return { overall_score, website, seo, branding, social, priority_fixes }
+}
+
+function clampScore(n: unknown): number {
+  const v = Number(n)
+  if (!Number.isFinite(v)) return 50
+  return Math.max(0, Math.min(100, Math.round(v)))
 }
 
 function sanitizeMatrix(raw: OptimizationMatrixRaw[] | undefined): NonNullable<OptimizationMatrixRaw[]> & { id: string }[] {

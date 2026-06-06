@@ -210,6 +210,7 @@ function StatusBadge({ status, progress }: { status: Analysis['status']; progres
   const map = {
     pending:     { c: '#9aa6b8', bg: 'rgba(154,166,184,0.12)', label: 'Pending' },
     researching: { c: '#60a5fa', bg: 'rgba(96,165,250,0.12)', label: `Researching ${progress}%` },
+    auditing:    { c: '#22d3ee', bg: 'rgba(34,211,238,0.12)',  label: `Auditing ${progress}%` },
     analyzing:   { c: '#a78bfa', bg: 'rgba(167,139,250,0.12)', label: `Analyzing ${progress}%` },
     pricing:     { c: '#f59e0b', bg: 'rgba(245,158,11,0.12)', label: `Pricing ${progress}%` },
     complete:    { c: '#34d399', bg: 'rgba(52,211,153,0.12)', label: 'Ready' },

@@ -1,4 +1,4 @@
-import type { AnalysisReport, Brand, Source } from '../../types'
+import type { AnalysisReport, Brand, Source, AuditArea, SocialArea, PriorityFix } from '../../types'
 import { formatMoney, effortColor, tierColor } from '../../lib/format'
 
 interface Props {
@@ -142,8 +142,37 @@ export default function ReportView({ report, brand, companyName, sources, previe
         </div>
       </Section>
 
+      {/* ── Digital Presence Audit ─────────────────────────────── */}
+      {report.digital_audit && (
+        <Section title="3. Digital Presence Audit" accent={accent} preview={preview}>
+          <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 14 }}>
+            Public-facing footprint scored across four dimensions. Overall: <strong style={{ color: scoreColor(report.digital_audit.overall_score, accent) }}>
+              {report.digital_audit.overall_score}/100
+            </strong>.
+          </p>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }} className="audit-grid">
+            <AuditCard label="Website / UX" area={report.digital_audit.website}  accent={accent} preview={preview} />
+            <AuditCard label="SEO"          area={report.digital_audit.seo}      accent={accent} preview={preview} />
+            <AuditCard label="Branding"     area={report.digital_audit.branding} accent={accent} preview={preview} />
+            <SocialCard area={report.digital_audit.social} accent={accent} preview={preview} />
+          </div>
+
+          {report.digital_audit.priority_fixes.length > 0 && (
+            <>
+              <Subhead>Priority Fixes</Subhead>
+              <div style={{ display: 'grid', gap: 8 }}>
+                {report.digital_audit.priority_fixes.map((fix, i) => (
+                  <PriorityFixRow key={i} fix={fix} accent={accent} preview={preview} />
+                ))}
+              </div>
+            </>
+          )}
+        </Section>
+      )}
+
       {/* ── Optimization Matrix ────────────────────────────────── */}
-      <Section title="3. Optimization Matrix" accent={accent} preview={preview}>
+      <Section title={report.digital_audit ? '4. Optimization Matrix' : '3. Optimization Matrix'} accent={accent} preview={preview}>
         <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 14 }}>
           {report.optimization_matrix.length} categorized solutions addressing the weaknesses and opportunities above.
         </p>
@@ -155,7 +184,7 @@ export default function ReportView({ report, brand, companyName, sources, previe
       </Section>
 
       {/* ── Roadmap ────────────────────────────────────────────── */}
-      <Section title="4. Strategic Roadmap" accent={accent} preview={preview}>
+      <Section title={report.digital_audit ? '5. Strategic Roadmap' : '4. Strategic Roadmap'} accent={accent} preview={preview}>
         <div style={{ display: 'grid', gap: 14 }}>
           {report.roadmap.map((tier) => {
             const items = report.optimization_matrix.filter((m) => tier.item_ids.includes(m.id))
@@ -183,7 +212,7 @@ export default function ReportView({ report, brand, companyName, sources, previe
       </Section>
 
       {/* ── Pricing / SOW ─────────────────────────────────────── */}
-      <Section title="5. Pricing & Statement of Work" accent={accent} preview={preview}>
+      <Section title={report.digital_audit ? '6. Pricing & Statement of Work' : '5. Pricing & Statement of Work'} accent={accent} preview={preview}>
         <p style={{ fontSize: 13, opacity: 0.7, marginBottom: 14 }}>
           Line-itemized investment quote at <strong>{formatMoney(report.pricing.hourly_rate, report.pricing.currency)}/hr</strong>.
           Bundled engagement includes a <strong>{report.pricing.bundle_discount_pct}%</strong> discount.
@@ -514,3 +543,141 @@ function pricingTotalsCard(preview: boolean, accent: string): React.CSSPropertie
 function renderTemplate(template: string, vars: Record<string, string>): string {
   return template.replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (_, k) => vars[k] ?? '')
 }
+
+/* ── Audit sub-components ────────────────────────────────────────── */
+
+function scoreColor(score: number, accent: string): string {
+  if (score >= 80) return '#34d399'
+  if (score >= 60) return accent
+  if (score >= 40) return '#fbbf24'
+  return '#fb7185'
+}
+
+function AuditCard({ label, area, accent, preview }: { label: string; area: AuditArea; accent: string; preview: boolean }) {
+  const color = scoreColor(area.score, accent)
+  return (
+    <div
+      style={{
+        padding: 12,
+        borderRadius: 10,
+        background: preview ? 'rgba(255,255,255,0.025)' : '#f8fafc',
+        border: `1px solid ${preview ? color + '33' : '#e2e8f0'}`,
+        borderLeft: `3px solid ${color}`,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color }}>{label}</div>
+        <ScorePill score={area.score} color={color} />
+      </div>
+      {area.notes && <div style={{ fontSize: 11.5, opacity: 0.7, marginBottom: 8, lineHeight: 1.5 }}>{area.notes}</div>}
+      {area.strengths.length > 0 && (
+        <>
+          <MiniLabel color="#34d399">Strengths</MiniLabel>
+          <ul style={miniList}>{area.strengths.map((s, i) => <li key={i} style={miniLi}>{s}</li>)}</ul>
+        </>
+      )}
+      {area.issues.length > 0 && (
+        <>
+          <MiniLabel color="#fb7185">Issues</MiniLabel>
+          <ul style={miniList}>{area.issues.map((s, i) => <li key={i} style={miniLi}>{s}</li>)}</ul>
+        </>
+      )}
+    </div>
+  )
+}
+
+function SocialCard({ area, accent, preview }: { area: SocialArea; accent: string; preview: boolean }) {
+  const color = scoreColor(area.score, accent)
+  return (
+    <div
+      style={{
+        padding: 12,
+        borderRadius: 10,
+        background: preview ? 'rgba(255,255,255,0.025)' : '#f8fafc',
+        border: `1px solid ${preview ? color + '33' : '#e2e8f0'}`,
+        borderLeft: `3px solid ${color}`,
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+        <div style={{ fontSize: 11.5, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.08em', color }}>Social Media</div>
+        <ScorePill score={area.score} color={color} />
+      </div>
+      {area.notes && <div style={{ fontSize: 11.5, opacity: 0.7, marginBottom: 8, lineHeight: 1.5 }}>{area.notes}</div>}
+      {area.platforms.length > 0 && (
+        <div style={{ display: 'grid', gap: 4, marginBottom: 6 }}>
+          {area.platforms.map((p, i) => {
+            const statusColor = p.status === 'active' ? '#34d399' : p.status === 'dormant' ? '#fbbf24' : p.status === 'absent' ? '#fb7185' : '#9aa6b8'
+            return (
+              <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5 }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: statusColor, flexShrink: 0 }} />
+                <span style={{ fontWeight: 600, minWidth: 70 }}>
+                  {p.url ? (
+                    <a href={p.url} target="_blank" rel="noreferrer" style={{ color: accent, textDecoration: 'none' }}>{p.name} ↗</a>
+                  ) : p.name}
+                </span>
+                <span style={{ opacity: 0.7 }}>{p.notes || p.status}</span>
+              </div>
+            )
+          })}
+        </div>
+      )}
+      {area.issues.length > 0 && (
+        <>
+          <MiniLabel color="#fb7185">Issues</MiniLabel>
+          <ul style={miniList}>{area.issues.map((s, i) => <li key={i} style={miniLi}>{s}</li>)}</ul>
+        </>
+      )}
+    </div>
+  )
+}
+
+function ScorePill({ score, color }: { score: number; color: string }) {
+  return (
+    <span
+      style={{
+        padding: '2px 8px',
+        borderRadius: 999,
+        background: color + '22',
+        color,
+        fontSize: 11,
+        fontWeight: 700,
+        border: `1px solid ${color}55`,
+      }}
+    >
+      {score}/100
+    </span>
+  )
+}
+
+function MiniLabel({ color, children }: { color: string; children: React.ReactNode }) {
+  return (
+    <div style={{ fontSize: 10, fontWeight: 600, color, textTransform: 'uppercase', letterSpacing: '0.06em', marginTop: 6, marginBottom: 2 }}>
+      {children}
+    </div>
+  )
+}
+
+function PriorityFixRow({ fix, accent, preview }: { fix: PriorityFix; accent: string; preview: boolean }) {
+  const impactColor = fix.impact === 'High' ? '#fb7185' : fix.impact === 'Medium' ? '#fbbf24' : '#9aa6b8'
+  return (
+    <div
+      style={{
+        padding: 10,
+        borderRadius: 10,
+        background: preview ? 'rgba(255,255,255,0.025)' : '#f8fafc',
+        border: '1px solid ' + (preview ? 'rgba(255,255,255,0.08)' : '#e2e8f0'),
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+      }}
+    >
+      <Pill color={accent}>{fix.area}</Pill>
+      <div style={{ flex: 1, fontSize: 13, fontWeight: 500 }}>{fix.title}</div>
+      <Pill color={impactColor}>{fix.impact} impact</Pill>
+      <Pill color={effortColor(fix.effort)}>{fix.effort} effort</Pill>
+    </div>
+  )
+}
+
+const miniList: React.CSSProperties = { margin: 0, padding: '0 0 0 14px', listStyle: 'disc' }
+const miniLi: React.CSSProperties = { fontSize: 11.5, lineHeight: 1.45, marginBottom: 2 }

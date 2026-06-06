@@ -51,7 +51,7 @@ export default function AnalysisDetailPage() {
   // Poll while running
   useEffect(() => {
     if (!a || !analysisId) return
-    const active = a.status === 'researching' || a.status === 'analyzing' || a.status === 'pricing'
+    const active = a.status === 'researching' || a.status === 'auditing' || a.status === 'analyzing' || a.status === 'pricing'
     if (!active) return
     const interval = setInterval(async () => {
       const { data } = await supabase.from('forge_analyses').select('*').eq('id', analysisId).maybeSingle()
@@ -203,6 +203,7 @@ export default function AnalysisDetailPage() {
 function StagePipeline({ status, progress }: { status: Analysis['status']; progress: number }) {
   const stages: { key: Analysis['status']; label: string }[] = [
     { key: 'researching', label: 'Researching' },
+    { key: 'auditing',    label: 'Auditing' },
     { key: 'analyzing',   label: 'Analyzing' },
     { key: 'pricing',     label: 'Pricing' },
   ]
@@ -239,7 +240,7 @@ function StagePipeline({ status, progress }: { status: Analysis['status']; progr
         />
       </div>
       <p style={{ fontSize: 11, color: '#5f6b7e', marginTop: 8 }}>
-        Web research, then full SWOT + Optimization Matrix + Roadmap, then deterministic pricing. Takes 60–120 seconds.
+        Web research → digital presence audit (website, SEO, branding, social) → full SWOT + Optimization Matrix + Roadmap → deterministic pricing. Takes 90–180 seconds.
       </p>
     </div>
   )

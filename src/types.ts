@@ -3,10 +3,59 @@
 export type AnalysisStatus =
   | 'pending'        // created, not yet started
   | 'researching'    // research stage running
+  | 'auditing'       // digital presence audit (website / SEO / branding / social)
   | 'analyzing'      // SWOT + matrix + roadmap running
   | 'pricing'        // computing pricing from rate card
   | 'complete'
   | 'error'
+
+/* ─── Digital Presence Audit ─────────────────────────────────────── */
+
+export interface AuditArea {
+  /** 0–100 score */
+  score: number
+  strengths: string[]
+  issues: string[]
+  /** 1–2 sentence summary of what was evaluated */
+  notes: string
+}
+
+export type SocialStatus = 'active' | 'dormant' | 'absent' | 'unknown'
+
+export interface SocialPlatform {
+  name: string
+  url?: string
+  status: SocialStatus
+  notes: string
+}
+
+export interface SocialArea {
+  score: number
+  platforms: SocialPlatform[]
+  issues: string[]
+  notes: string
+}
+
+export type PriorityImpact = 'High' | 'Medium' | 'Low'
+export type AuditArea_Slug = 'website' | 'seo' | 'branding' | 'social'
+
+export interface PriorityFix {
+  title: string
+  area: AuditArea_Slug
+  impact: PriorityImpact
+  effort: 'Low' | 'Medium' | 'High'
+}
+
+export interface DigitalAudit {
+  /** Overall score derived from the four areas */
+  overall_score: number
+  website: AuditArea
+  seo: AuditArea
+  branding: AuditArea
+  social: SocialArea
+  /** Top 3–6 fixes pulled out of the area issues for executive scanning */
+  priority_fixes: PriorityFix[]
+}
 
 export interface Competitor {
   name: string
@@ -96,11 +145,13 @@ export interface AnalysisReport {
   }
   /** Section 2 — SWOT */
   swot: Swot
-  /** Section 3 — Optimization Matrix */
+  /** Section 3 — Digital Presence Audit (optional for legacy analyses) */
+  digital_audit?: DigitalAudit
+  /** Section 4 — Optimization Matrix */
   optimization_matrix: OptimizationItem[]
-  /** Section 4 — Strategic Roadmap (computed from matrix items by tier) */
+  /** Section 5 — Strategic Roadmap (computed from matrix items by tier) */
   roadmap: RoadmapTier[]
-  /** Section 5 — Pricing & SOW (deterministically computed) */
+  /** Section 6 — Pricing & SOW (deterministically computed) */
   pricing: Pricing
 }
 
