@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+:root {
+  --bg-base: #0a0e16;
+  --bg-card: #111722;
+  --bg-card-elevated: #18202e;
+  --border: rgba(255, 255, 255, 0.06);
+  --text-primary: #e6ebf2;
+  --text-secondary: #9aa6b8;
+  --text-muted: #5f6b7e;
+  --steel: #60a5fa;
+  --ember: #f59e0b;
+  --emerald: #34d399;
+  --rose: #fb7185;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg-base);
+  font-family: 'Inter', system-ui, sans-serif;
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  min-height: 100vh;
+}
+
+h1, h2, h3, h4 {
+  font-family: 'Sora', sans-serif;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+button, input, textarea, select { font-family: inherit; }
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.15); }
+
+@keyframes ember-pulse {
+  0%, 100% { opacity: 0.85; transform: scale(1); }
+  50% { opacity: 0.35; transform: scale(1.08); }
+}
+
+@keyframes spark-rise {
+  0% { transform: translateY(0) scale(1); opacity: 0; }
+  20% { opacity: 1; }
+  100% { transform: translateY(-32px) scale(0.2); opacity: 0; }
+}
+
+@keyframes radar-sweep {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+/* Print stylesheet for branded report PDF export */
+@media print {
+  body { background: white !important; color: #111 !important; }
+  .no-print { display: none !important; }
+  .print-page-break { page-break-before: always; }
+  @page { margin: 0.5in; size: letter; }
+}
