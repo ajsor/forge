@@ -167,6 +167,9 @@ Then sums per tier and applies the bundle discount to produce the SOW totals.
 
 ## Changelog
 
+### 2026-06-08 — Edge function errors now log to shared `app_issues`
+- `supabase/functions/_shared/appIssues.ts` (new); `forge-analyze` catch block now fires `logAppIssue({fn, stage, detail})` into stonecode.ai's shared `app_issues` table (migration 023). Failures surface in `/portal/admin/app-issues`.
+
 ### 2026-06-06 — Project initiated
 - Vite + React 19 + TS scaffold, Tailwind 4, Framer Motion, React Router 7
 - Schema (`forge_brands`, `forge_rate_card`, `forge_analyses`, `forge_share_links`) + RLS + `forge` feature flag

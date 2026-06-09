@@ -8,6 +8,7 @@
 // LLMs estimate dev hours per line item; the app multiplies.
 
 import Anthropic from 'npm:@anthropic-ai/sdk@0.36.3'
+import { logAppIssue } from '../_shared/appIssues.ts'
 
 const CORS = {
   'Access-Control-Allow-Origin': 'https://forge.stonecode.ai',
@@ -435,8 +436,9 @@ Deno.serve(async (req) => {
 
     return json({ success: true }, 200, headers)
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
+    const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
     console.error('forge-analyze error:', msg)
+    logAppIssue({ fn: 'forge-analyze', stage, detail: msg })
     if (supabaseAdmin && analysisId) {
       try {
         await supabaseAdmin.from('forge_analyses')
