@@ -1,6 +1,7 @@
 import { createContext, useContext, useEffect, useState, type ReactNode } from 'react'
 import type { Session, User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabase'
+import { logLaunchIfFirstThisSession } from '../lib/logLaunch'
 
 interface AuthContextValue {
   session: Session | null
@@ -16,12 +17,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     supabase.auth.getSession()
-      .then(({ data }) => setSession(data.session))
+      .then(({ data }) => {
+        setSession(data.session)
+        if (data.session) void logLaunchIfFirstThisSession()
+      })
       .catch((err) => console.error('Auth session error:', err))
       .finally(() => setLoading(false))
 
     const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, newSession) => {
       setSession(newSession)
+      if (newSession) void logLaunchIfFirstThisSession()
     })
 
     return () => subscription.unsubscribe()
