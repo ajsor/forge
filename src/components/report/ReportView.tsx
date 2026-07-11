@@ -286,6 +286,18 @@ export default function ReportView({ report, brand, companyName, sources, previe
             <span style={{ color: accent }}>{formatMoney(report.pricing.total, report.pricing.currency)}</span>
           </div>
         </div>
+
+        {brand?.payment_url && (
+          <DepositCta
+            paymentUrl={brand.payment_url}
+            depositPct={brand.deposit_pct}
+            total={report.pricing.total}
+            currency={report.pricing.currency}
+            accent={accent}
+            ember={ember}
+            preview={preview}
+          />
+        )}
       </Section>
 
       {/* ── Sources & footer ──────────────────────────────────── */}
@@ -339,6 +351,53 @@ export default function ReportView({ report, brand, companyName, sources, previe
 }
 
 /* ── Sub-components ──────────────────────────────────────────────── */
+
+function DepositCta({
+  paymentUrl, depositPct, total, currency, accent, ember, preview,
+}: {
+  paymentUrl: string
+  depositPct: number | null
+  total: number
+  currency: string
+  accent: string
+  ember: string
+  preview: boolean
+}) {
+  const deposit = depositPct && depositPct > 0 ? Math.round((total * depositPct) / 100) : null
+  const label = deposit
+    ? `Pay ${formatMoney(deposit, currency)} deposit to get started`
+    : 'Pay deposit & get started'
+  return (
+    <div className="no-print" style={{ marginTop: 16, textAlign: 'center' }}>
+      <a
+        href={paymentUrl}
+        target="_blank"
+        rel="noreferrer"
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '12px 22px',
+          borderRadius: 12,
+          background: `linear-gradient(135deg, ${accent} 0%, ${ember} 100%)`,
+          color: '#0a0e16',
+          fontWeight: 700,
+          fontSize: 15,
+          textDecoration: 'none',
+          boxShadow: preview ? 'none' : '0 8px 24px rgba(0,0,0,0.12)',
+        }}
+      >
+        {label}
+        <span aria-hidden>→</span>
+      </a>
+      {depositPct && depositPct > 0 ? (
+        <div style={{ fontSize: 11.5, marginTop: 6, opacity: 0.65 }}>
+          {depositPct}% deposit · balance due per the engagement schedule
+        </div>
+      ) : null}
+    </div>
+  )
+}
 
 function Section({
   title, accent, preview, children,

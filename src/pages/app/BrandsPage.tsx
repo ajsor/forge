@@ -18,6 +18,8 @@ const BLANK = (): Partial<Brand> => ({
   legal_jurisdiction: '',
   cover_letter_template: 'Dear {{company_name}} team,\n\nWe analyzed your operations and identified specific opportunities to drive measurable outcomes. The plan below details what we propose, the work involved, and a transparent investment quote.\n\nLet\'s discuss what resonates.',
   show_stonecode_attribution: false,
+  payment_url: '',
+  deposit_pct: null,
   is_default: false,
 })
 
@@ -180,6 +182,22 @@ function BrandEditor({
 
         <Field label="Legal entity (for SOW)"><Input value={brand.legal_entity ?? ''} onChange={(v) => setField('legal_entity', v)} placeholder="Acme Consulting LLC" /></Field>
         <Field label="Jurisdiction"><Input value={brand.legal_jurisdiction ?? ''} onChange={(v) => setField('legal_jurisdiction', v)} placeholder="State of Delaware, USA" /></Field>
+
+        <Field label="Deposit / payment link (Stripe Payment Link or any checkout URL)" full hint="Shows a 'Pay deposit' button on share links">
+          <Input value={brand.payment_url ?? ''} onChange={(v) => setField('payment_url', v)} placeholder="https://buy.stripe.com/…" />
+        </Field>
+        <Field label="Suggested deposit %" hint="Optional — drives the amount on the button">
+          <input
+            type="number"
+            min={0}
+            max={100}
+            value={brand.deposit_pct ?? ''}
+            onChange={(e) => setField('deposit_pct', e.target.value === '' ? null : Math.max(0, Math.min(100, Number(e.target.value))))}
+            placeholder="e.g. 25"
+            className="w-full rounded-xl px-3 py-2 text-sm outline-none"
+            style={inputStyle}
+          />
+        </Field>
 
         <Field label="Cover letter template" full hint="Supports {{company_name}}">
           <textarea

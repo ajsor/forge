@@ -208,6 +208,10 @@ export interface Brand {
   cover_letter_template: string | null
   /** Show 'Powered by stonecode.ai' attribution in footer */
   show_stonecode_attribution: boolean
+  /** No-code Stripe Payment Link (or any checkout URL) for the deposit CTA */
+  payment_url: string | null
+  /** Optional deposit percentage, used to suggest a deposit amount on the CTA */
+  deposit_pct: number | null
   is_default: boolean
   created_at: string
   updated_at: string
