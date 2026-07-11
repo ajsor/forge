@@ -167,6 +167,14 @@ Then sums per tier and applies the bundle discount to produce the SOW totals.
 
 ## Changelog
 
+### 2026-07-11 — Security hardening + SOW features
+- **Share-link enumeration fixed:** anon SELECT on `forge_share_links` (no slug predicate, so every active report/brand snapshot was downloadable) replaced with the `forge_share_link_get` SECURITY DEFINER RPC keyed on the full slug (**migration 005**); public viewer reads one row. `forge-analyze` no longer returns/stores stack traces (message only) and is rate-limited via shared `ai_usage_events` (**migration 006**).
+- **Editable optimization matrix:** an "Edit plan" mode retitles / retiers / adjusts hours / removes line items with a live deterministically-recomputed total (`src/lib/pricing.ts` mirrors the edge pricing math).
+- **Share-link expiry** (set at publish, changeable per link) + delete; **per-brand Stripe Payment Link + deposit %** (**migration 007**) rendering a "Pay deposit" CTA on the public report.
+- **Forge→Cameo handoff:** "Generate demo site" on a completed analysis seeds a Cameo project from the dossier and opens cameo.stonecode.ai.
+- Analyses list search + delete.
+- **Requires migrations 005+006+007 and redeploy of `forge-analyze` before pushing the frontend** (the public viewer depends on the RPC; BrandsPage depends on the payment columns).
+
 ### 2026-06-08 — Edge function errors now log to shared `app_issues`
 - `supabase/functions/_shared/appIssues.ts` (new); `forge-analyze` catch block now fires `logAppIssue({fn, stage, detail})` into stonecode.ai's shared `app_issues` table (migration 023). Failures surface in `/portal/admin/app-issues`.
 
