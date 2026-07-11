@@ -25,20 +25,17 @@ export default function ReportViewPage() {
       const anon = createClient(supabaseUrl, supabaseAnon, {
         auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
       })
-      const { data } = await anon
-        .from('forge_share_links')
-        .select('id, slug, brand_snapshot, report_snapshot, company_name, is_active, view_count, expires_at, created_at, analysis_id, user_id')
-        .eq('slug', slug)
-        .eq('is_active', true)
-        .maybeSingle()
+      // Read exactly one row by full slug through a SECURITY DEFINER RPC (which
+      // also bumps view_count). The anon role has no direct table access, so
+      // links can't be enumerated.
+      const { data } = await anon.rpc('forge_share_link_get', { p_slug: slug })
       if (cancelled) return
-      if (!data) { setNotFound(true); return }
-      const r = data as unknown as ShareLink
+      const row = Array.isArray(data) ? data[0] : data
+      if (!row) { setNotFound(true); return }
+      const r = row as unknown as ShareLink
       setLink(r)
       setReport(r.report_snapshot)
       setBrand(r.brand_snapshot)
-      // Fire and forget view bump — ignore errors
-      try { await anon.rpc('forge_share_link_view', { p_slug: slug }) } catch { /* swallow */ }
     }
     void run()
     return () => { cancelled = true }

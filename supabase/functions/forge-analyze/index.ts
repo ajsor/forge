@@ -9,6 +9,7 @@
 
 import Anthropic from 'npm:@anthropic-ai/sdk@0.36.3'
 import { logAppIssue } from '../_shared/appIssues.ts'
+import { enforceRateLimit, RateLimitError } from '../_shared/rateLimit.ts'
 
 const CORS = {
   'Access-Control-Allow-Origin': 'https://forge.stonecode.ai',
@@ -204,6 +205,8 @@ Deno.serve(async (req) => {
     stage = 'auth'
     const { data: { user }, error: authError } = await supabaseUser.auth.getUser()
     if (authError || !user) return json({ error: 'Unauthorized' }, 401, headers)
+
+    await enforceRateLimit(supabaseAdmin, user.id, 'forge', 'analyze', { max: 20, windowMinutes: 60 })
 
     const body = await req.json()
     analysisId = String(body.analysis_id ?? '')
@@ -436,17 +439,23 @@ Deno.serve(async (req) => {
 
     return json({ success: true }, 200, headers)
   } catch (err) {
-    const msg = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
-    console.error('forge-analyze error:', msg)
-    logAppIssue({ fn: 'forge-analyze', stage, detail: msg })
+    if (err instanceof RateLimitError) {
+      return json({ error: err.message }, 429, headers)
+    }
+    // Full detail (incl. stack) goes to logs + app_issues only. The client and
+    // the stored row get the message alone — never the stack trace.
+    const detail = err instanceof Error ? `${err.message}\n${err.stack ?? ''}` : String(err)
+    const publicMsg = err instanceof Error ? err.message : 'Forge failed'
+    console.error('forge-analyze error:', detail)
+    logAppIssue({ fn: 'forge-analyze', stage, detail })
     if (supabaseAdmin && analysisId) {
       try {
         await supabaseAdmin.from('forge_analyses')
-          .update({ status: 'error', error: msg.slice(0, 500), updated_at: new Date().toISOString() })
+          .update({ status: 'error', error: publicMsg.slice(0, 500), updated_at: new Date().toISOString() })
           .eq('id', analysisId)
       } catch (_) { /* swallow */ }
     }
-    return json({ error: msg || 'Forge failed', stage }, 500, headers)
+    return json({ error: publicMsg, stage }, 500, headers)
   }
 })
 
