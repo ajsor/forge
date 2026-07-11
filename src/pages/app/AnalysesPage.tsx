@@ -17,6 +17,7 @@ export default function AnalysesPage() {
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [importReconId, setImportReconId] = useState('')
+  const [query, setQuery] = useState('')
 
   useEffect(() => { void load() }, [user?.id])
 
@@ -56,6 +57,21 @@ export default function AnalysesPage() {
     if (error || !data) { setError(error?.message || 'Failed to create analysis.'); return }
     navigate(`/app/analyses/${data.id}`)
   }
+
+  const deleteAnalysis = async (id: string) => {
+    if (!confirm('Delete this analysis and its share links? This can’t be undone.')) return
+    const { error } = await supabase.from('forge_analyses').delete().eq('id', id)
+    if (!error) setAnalyses((prev) => prev.filter((a) => a.id !== id))
+  }
+
+  const filtered = query.trim()
+    ? analyses.filter((a) => {
+        const q = query.toLowerCase()
+        return (a.company_name ?? '').toLowerCase().includes(q) ||
+          a.target.toLowerCase().includes(q) ||
+          (a.context ?? '').toLowerCase().includes(q)
+      })
+    : analyses
 
   return (
     <div className="flex flex-col gap-8">
@@ -170,20 +186,35 @@ export default function AnalysesPage() {
           <p style={{ color: '#9aa6b8', fontSize: 14 }}>Forge your first SMB optimization report above.</p>
         </div>
       ) : (
-        <div className="flex flex-col gap-2">
-          {analyses.map((a, i) => <AnalysisRow key={a.id} a={a} index={i} brand={brands.find(b => b.id === a.brand_id) ?? null} />)}
+        <div className="flex flex-col gap-3">
+          <input
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search analyses…"
+            className="w-full rounded-xl px-4 py-2.5 text-sm outline-none"
+            style={{ background: '#111722', border: '1px solid rgba(255,255,255,0.08)', color: '#e6ebf2' }}
+          />
+          <div className="flex flex-col gap-2">
+            {filtered.length === 0 ? (
+              <p style={{ color: '#5f6b7e', fontSize: 14, textAlign: 'center', padding: 24 }}>No analyses match “{query}”.</p>
+            ) : (
+              filtered.map((a, i) => (
+                <AnalysisRow key={a.id} a={a} index={i} brand={brands.find(b => b.id === a.brand_id) ?? null} onDelete={deleteAnalysis} />
+              ))
+            )}
+          </div>
         </div>
       )}
     </div>
   )
 }
 
-function AnalysisRow({ a, index, brand }: { a: Analysis; index: number; brand: Brand | null }) {
+function AnalysisRow({ a, index, brand, onDelete }: { a: Analysis; index: number; brand: Brand | null; onDelete: (id: string) => void }) {
   return (
-    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: index * 0.03 }}>
+    <motion.div initial={{ opacity: 0, y: 6 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: index * 0.03 }} className="flex items-stretch gap-2">
       <Link
         to={`/app/analyses/${a.id}`}
-        className="flex items-center gap-4 rounded-xl p-4 transition-all hover:scale-[1.005]"
+        className="flex items-center gap-4 rounded-xl p-4 transition-all hover:scale-[1.005] flex-1 min-w-0"
         style={{ background: '#111722', border: '1px solid rgba(255,255,255,0.06)', textDecoration: 'none', color: 'inherit' }}
       >
         <StatusBadge status={a.status} progress={a.progress} />
@@ -202,6 +233,18 @@ function AnalysisRow({ a, index, brand }: { a: Analysis; index: number; brand: B
         </div>
         <div style={{ fontSize: 11, color: '#5f6b7e' }}>{new Date(a.created_at).toLocaleDateString()}</div>
       </Link>
+      <button
+        onClick={() => onDelete(a.id)}
+        aria-label="Delete analysis"
+        className="rounded-xl px-3 flex items-center justify-center flex-shrink-0"
+        style={{ background: '#111722', border: '1px solid rgba(255,255,255,0.06)', color: '#8b93a7', cursor: 'pointer' }}
+      >
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="3 6 5 6 21 6" />
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+          <path d="M10 11v6M14 11v6" />
+        </svg>
+      </button>
     </motion.div>
   )
 }
