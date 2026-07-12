@@ -3,11 +3,20 @@
 // Stages, written to forge_analyses.status + .progress as they run:
 //   pending → researching → auditing → analyzing → pricing → complete
 //
+// The pipeline is split across SEPARATE invocations — one Claude-backed stage
+// per HTTP request — so each runs in its own edge worker with a fresh
+// wall-clock budget. Running all stages in a single request (research + two
+// web-search calls + analysis) reliably exceeded Supabase's ~150s request
+// limit and got the worker killed mid-run. Each stage advances `status`,
+// stashes its artifact in `pipeline_state`, and self-invokes the next stage;
+// the frontend just polls status → 'complete'.
+//
 // Pricing is computed DETERMINISTICALLY from the user's forge_rate_card
 // (hourly_rate × dev_hours × tier_multiplier), not by the LLM.
 // LLMs estimate dev hours per line item; the app multiplies.
 
 import Anthropic from 'npm:@anthropic-ai/sdk@0.36.3'
+import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { logAppIssue } from '../_shared/appIssues.ts'
 import { enforceRateLimit, RateLimitError } from '../_shared/rateLimit.ts'
 
@@ -175,6 +184,12 @@ interface RateCardRow {
   tier3_multiplier: number
 }
 
+interface PipelineState {
+  dossier?: ResearchDossier
+  digital_audit?: ReturnType<typeof sanitizeAudit>
+  analysis?: AnalysisJson
+}
+
 /* ── Entry ────────────────────────────────────────────────────────── */
 
 Deno.serve(async (req) => {
@@ -184,18 +199,14 @@ Deno.serve(async (req) => {
 
   let stage = 'init'
   let analysisId: string | null = null
-  let supabaseAdmin: ReturnType<typeof makeAdmin> | null = null
+  let admin: SupabaseClient | null = null
 
   try {
     const authHeader = req.headers.get('Authorization')
     if (!authHeader) return json({ error: 'Unauthorized' }, 401, headers)
 
     const { createClient } = await import('npm:@supabase/supabase-js@2')
-
-    function makeAdmin() {
-      return createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
-    }
-    supabaseAdmin = makeAdmin()
+    admin = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
     const supabaseUser = createClient(
       Deno.env.get('SUPABASE_URL')!,
       Deno.env.get('SUPABASE_ANON_KEY')!,
@@ -206,18 +217,16 @@ Deno.serve(async (req) => {
     const { data: { user }, error: authError } = await supabaseUser.auth.getUser()
     if (authError || !user) return json({ error: 'Unauthorized' }, 401, headers)
 
-    await enforceRateLimit(supabaseAdmin, user.id, 'forge', 'analyze', { max: 20, windowMinutes: 60 })
-
-    const body = await req.json()
+    const body = await req.json().catch(() => ({} as Record<string, unknown>))
     analysisId = String(body.analysis_id ?? '')
     if (!analysisId || !/^[0-9a-f-]{36}$/i.test(analysisId)) {
       return json({ error: 'Invalid analysis_id' }, 400, headers)
     }
 
     stage = 'load_analysis'
-    const { data: row } = await supabaseAdmin
+    const { data: row } = await admin
       .from('forge_analyses')
-      .select('id, user_id, target, context, recon_brief_id')
+      .select('id, user_id, target, context, recon_brief_id, status, pipeline_state')
       .eq('id', analysisId)
       .maybeSingle()
     if (!row || row.user_id !== user.id) return json({ error: 'Forbidden' }, 403, headers)
@@ -226,179 +235,228 @@ Deno.serve(async (req) => {
     const context = String(row.context ?? '').slice(0, 600)
     if (target.trim().length < 2) return json({ error: 'Target too short' }, 400, headers)
 
-    // Reset for retry
-    await supabaseAdmin.from('forge_analyses')
-      .update({ status: 'researching', progress: 5, error: null })
-      .eq('id', analysisId)
+    // Which single stage does this invocation run? Derived from `status` so the
+    // chain is idempotent and retry-safe.
+    let pstate = (row.pipeline_state ?? {}) as PipelineState
+    const isStart = row.status === 'pending' || row.status === 'error'
+    let current: 'research' | 'audit' | 'analyze' | 'pricing'
+    if (isStart || row.status === 'researching') current = 'research'
+    else if (row.status === 'auditing') current = 'audit'
+    else if (row.status === 'analyzing') current = 'analyze'
+    else if (row.status === 'pricing') current = 'pricing'
+    else return json({ status: row.status, done: true }, 200, headers) // 'complete'/unknown
+
+    // Rate-limit and reset only on a fresh start (not on internal stage hops).
+    if (isStart) {
+      await enforceRateLimit(admin, user.id, 'forge', 'analyze', { max: 20, windowMinutes: 60 })
+      pstate = {}
+      await admin.from('forge_analyses')
+        .update({ status: 'researching', progress: 5, error: null, report: null, pipeline_state: {} })
+        .eq('id', analysisId)
+    }
 
     const anthropic = new Anthropic({ apiKey: Deno.env.get('ANTHROPIC_API_KEY')! })
 
+    // Each invocation runs exactly ONE stage and returns; the frontend re-invokes
+    // for the next stage until 'complete'. (Server-side self-chaining via
+    // waitUntil(fetch) proved unreliable — a worker spawned by an abandoned
+    // internal connection gets torn down before its own chain fetch fires.)
+
     /* ── Stage 1: Research ──────────────────────────────────────── */
-    stage = 'research'
-    let dossier: ResearchDossier | null = null
+    if (current === 'research') {
+      stage = 'research'
+      let dossier: ResearchDossier | null = null
 
-    // If linked to a Recon brief, hydrate from it (cheap path).
-    if (row.recon_brief_id) {
-      const { data: brief } = await supabaseAdmin
-        .from('recon_briefs')
-        .select('company_name, brief, sources')
-        .eq('id', row.recon_brief_id)
-        .eq('user_id', user.id)
-        .maybeSingle()
-      if (brief?.brief) {
-        dossier = adaptReconBriefToDossier(brief.company_name, brief.brief, brief.sources)
+      // If linked to a Recon brief, hydrate from it (cheap path).
+      if (row.recon_brief_id) {
+        const { data: brief } = await admin
+          .from('recon_briefs')
+          .select('company_name, brief, sources')
+          .eq('id', row.recon_brief_id)
+          .eq('user_id', user.id)
+          .maybeSingle()
+        if (brief?.brief) {
+          dossier = adaptReconBriefToDossier(brief.company_name, brief.brief, brief.sources)
+        }
       }
+
+      if (!dossier) {
+        const researchPrompt =
+          `Research this target and return a research dossier.\n\n` +
+          `TARGET: ${target}\n` +
+          (context ? `ENGAGEMENT CONTEXT: ${context}\n` : '') +
+          `\nReturn ONLY this JSON object as your final message:\n` +
+          `{\n` +
+          `  "company_name": "resolved company name",\n` +
+          `  "snapshot": "2-4 sentence factual overview (industry, size/stage, business model)",\n` +
+          `  "value_proposition": "what they sell and to whom",\n` +
+          `  "market_trends": ["force impacting their industry", "..."],\n` +
+          `  "competitors": [{ "name": "...", "positioning": "...", "url": "https://..." }],\n` +
+          `  "relative_positioning": "where target sits vs competitors",\n` +
+          `  "internal_signals": ["operational/tech clues from their site, careers page, etc."],\n` +
+          `  "external_signals": ["reviews, complaints, ratings, news"],\n` +
+          `  "ai_disruption_vectors": ["ways AI/automation will impact their sector"],\n` +
+          `  "customer_sentiment": ["common themes in reviews"],\n` +
+          `  "sources": [{ "title": "...", "url": "https://..." }]\n` +
+          `}`
+
+        const research = await anthropic.messages.create({
+          model: 'claude-sonnet-4-6',
+          max_tokens: 5120,
+          system: RESEARCH_SYSTEM,
+          tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 } as unknown as Anthropic.Tool],
+          messages: [{ role: 'user', content: researchPrompt }],
+        })
+
+        const text = collectText(research)
+        dossier = extractJson(text) as ResearchDossier | null
+        if (!dossier) throw new Error('Could not parse research dossier')
+      }
+
+      pstate.dossier = dossier
+      await admin.from('forge_analyses')
+        .update({
+          status: 'auditing',
+          progress: 30,
+          company_name: clamp(dossier.company_name, 160) || target,
+          sources: (dossier.sources ?? []).slice(0, 12).filter((s) => /^https?:\/\//i.test(s?.url ?? '')),
+          pipeline_state: pstate,
+        })
+        .eq('id', analysisId)
+
+      return json({ stage: 'research', next: 'auditing' }, 202, headers)
     }
-
-    if (!dossier) {
-      const researchPrompt =
-        `Research this target and return a research dossier.\n\n` +
-        `TARGET: ${target}\n` +
-        (context ? `ENGAGEMENT CONTEXT: ${context}\n` : '') +
-        `\nReturn ONLY this JSON object as your final message:\n` +
-        `{\n` +
-        `  "company_name": "resolved company name",\n` +
-        `  "snapshot": "2-4 sentence factual overview (industry, size/stage, business model)",\n` +
-        `  "value_proposition": "what they sell and to whom",\n` +
-        `  "market_trends": ["force impacting their industry", "..."],\n` +
-        `  "competitors": [{ "name": "...", "positioning": "...", "url": "https://..." }],\n` +
-        `  "relative_positioning": "where target sits vs competitors",\n` +
-        `  "internal_signals": ["operational/tech clues from their site, careers page, etc."],\n` +
-        `  "external_signals": ["reviews, complaints, ratings, news"],\n` +
-        `  "ai_disruption_vectors": ["ways AI/automation will impact their sector"],\n` +
-        `  "customer_sentiment": ["common themes in reviews"],\n` +
-        `  "sources": [{ "title": "...", "url": "https://..." }]\n` +
-        `}`
-
-      const research = await anthropic.messages.create({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 5120,
-        system: RESEARCH_SYSTEM,
-        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 8 } as unknown as Anthropic.Tool],
-        messages: [{ role: 'user', content: researchPrompt }],
-      })
-
-      const text = collectText(research)
-      dossier = extractJson(text) as ResearchDossier | null
-      if (!dossier) throw new Error('Could not parse research dossier')
-    }
-
-    await supabaseAdmin.from('forge_analyses')
-      .update({
-        status: 'auditing',
-        progress: 30,
-        company_name: clamp(dossier.company_name, 160) || target,
-        sources: (dossier.sources ?? []).slice(0, 12).filter((s) => /^https?:\/\//i.test(s?.url ?? '')),
-      })
-      .eq('id', analysisId)
 
     /* ── Stage 2: Digital Presence Audit ───────────────────────── */
-    stage = 'audit'
+    if (current === 'audit') {
+      stage = 'audit'
+      const dossier = pstate.dossier
+      if (!dossier) throw new Error('Missing research dossier for audit stage')
 
-    const auditPrompt =
-      `Audit this company's public digital presence. Use web search to actually visit their site and their social profiles.\n\n` +
-      `COMPANY: ${dossier.company_name}\n` +
-      `RESEARCH CONTEXT:\n${JSON.stringify({ snapshot: dossier.snapshot, value_proposition: dossier.value_proposition }, null, 2)}\n\n` +
-      `Return ONLY this JSON object:\n` +
-      `{\n` +
-      `  "website": {\n` +
-      `    "score": 72,\n` +
-      `    "strengths": ["..."],\n` +
-      `    "issues": ["specific, sellable fixes"],\n` +
-      `    "notes": "what you actually evaluated"\n` +
-      `  },\n` +
-      `  "seo": { "score": 45, "strengths": ["..."], "issues": ["..."], "notes": "..." },\n` +
-      `  "branding": { "score": 60, "strengths": ["..."], "issues": ["..."], "notes": "..." },\n` +
-      `  "social": {\n` +
-      `    "score": 35,\n` +
-      `    "platforms": [\n` +
-      `      { "name": "LinkedIn", "url": "https://www.linkedin.com/company/...", "status": "active", "notes": "Posts weekly, mostly product updates" },\n` +
-      `      { "name": "X", "url": null, "status": "absent", "notes": "No verifiable account found" }\n` +
-      `    ],\n` +
-      `    "issues": ["..."],\n` +
-      `    "notes": "..."\n` +
-      `  },\n` +
-      `  "priority_fixes": [\n` +
-      `    { "title": "...", "area": "seo|website|branding|social", "impact": "High|Medium|Low", "effort": "Low|Medium|High" }\n` +
-      `  ]\n` +
-      `}\n\n` +
-      `Produce 3-6 priority_fixes drawn from the most impactful issues across all four areas.`
+      const auditPrompt =
+        `Audit this company's public digital presence. Use web search to actually visit their site and their social profiles.\n\n` +
+        `COMPANY: ${dossier.company_name}\n` +
+        `RESEARCH CONTEXT:\n${JSON.stringify({ snapshot: dossier.snapshot, value_proposition: dossier.value_proposition }, null, 2)}\n\n` +
+        `Return ONLY this JSON object:\n` +
+        `{\n` +
+        `  "website": {\n` +
+        `    "score": 72,\n` +
+        `    "strengths": ["..."],\n` +
+        `    "issues": ["specific, sellable fixes"],\n` +
+        `    "notes": "what you actually evaluated"\n` +
+        `  },\n` +
+        `  "seo": { "score": 45, "strengths": ["..."], "issues": ["..."], "notes": "..." },\n` +
+        `  "branding": { "score": 60, "strengths": ["..."], "issues": ["..."], "notes": "..." },\n` +
+        `  "social": {\n` +
+        `    "score": 35,\n` +
+        `    "platforms": [\n` +
+        `      { "name": "LinkedIn", "url": "https://www.linkedin.com/company/...", "status": "active", "notes": "Posts weekly, mostly product updates" },\n` +
+        `      { "name": "X", "url": null, "status": "absent", "notes": "No verifiable account found" }\n` +
+        `    ],\n` +
+        `    "issues": ["..."],\n` +
+        `    "notes": "..."\n` +
+        `  },\n` +
+        `  "priority_fixes": [\n` +
+        `    { "title": "...", "area": "seo|website|branding|social", "impact": "High|Medium|Low", "effort": "Low|Medium|High" }\n` +
+        `  ]\n` +
+        `}\n\n` +
+        `Produce 3-6 priority_fixes drawn from the most impactful issues across all four areas.`
 
-    const auditMsg = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 5120,
-      system: AUDIT_SYSTEM,
-      tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 } as unknown as Anthropic.Tool],
-      messages: [{ role: 'user', content: auditPrompt }],
-    })
+      const auditMsg = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 5120,
+        system: AUDIT_SYSTEM,
+        tools: [{ type: 'web_search_20250305', name: 'web_search', max_uses: 6 } as unknown as Anthropic.Tool],
+        messages: [{ role: 'user', content: auditPrompt }],
+      })
 
-    const auditText = collectText(auditMsg)
-    const auditRaw = (extractJson(auditText) ?? {}) as DigitalAuditRaw
-    const digitalAudit = sanitizeAudit(auditRaw)
+      const auditText = collectText(auditMsg)
+      const auditRaw = (extractJson(auditText) ?? {}) as DigitalAuditRaw
+      const digitalAudit = sanitizeAudit(auditRaw)
 
-    await supabaseAdmin.from('forge_analyses')
-      .update({ status: 'analyzing', progress: 55 })
-      .eq('id', analysisId)
+      pstate.digital_audit = digitalAudit
+      await admin.from('forge_analyses')
+        .update({ status: 'analyzing', progress: 55, pipeline_state: pstate })
+        .eq('id', analysisId)
 
-    /* ── Stage 3: Analyze (SWOT + Matrix, informed by audit) ──── */
-    stage = 'analyze'
+      return json({ stage: 'audit', next: 'analyzing' }, 202, headers)
+    }
 
-    const analyzePrompt =
-      `Produce the full optimization report from this research dossier and digital presence audit.\n\n` +
-      `RESEARCH DOSSIER:\n${JSON.stringify(dossier, null, 2)}\n\n` +
-      `DIGITAL PRESENCE AUDIT:\n${JSON.stringify(digitalAudit, null, 2)}\n\n` +
-      (context ? `ENGAGEMENT CONTEXT: ${context}\n\n` : '') +
-      `Return ONLY this JSON object:\n` +
-      `{\n` +
-      `  "exec_summary": {\n` +
-      `    "company_overview": "2-3 sentences",\n` +
-      `    "value_proposition": "core value prop",\n` +
-      `    "market_trends": ["..."],\n` +
-      `    "competitors": [{ "name": "...", "positioning": "...", "url": "https://..." }],\n` +
-      `    "relative_positioning": "..."\n` +
-      `  },\n` +
-      `  "swot": {\n` +
-      `    "strengths":     [{ "point": "short label", "detail": "1-2 sentence explanation" }],\n` +
-      `    "weaknesses":    [{ "point": "...", "detail": "..." }],\n` +
-      `    "opportunities": [{ "point": "...", "detail": "..." }],\n` +
-      `    "threats":       [{ "point": "...", "detail": "..." }]\n` +
-      `  },\n` +
-      `  "optimization_matrix": [\n` +
-      `    {\n` +
-      `      "title": "Concise solution title",\n` +
-      `      "problem": "The underlying gap being addressed (anchored to a SWOT weakness/opportunity)",\n` +
-      `      "solution": "Detailed description of the fix — automation, AI tooling, SaaS, etc.",\n` +
-      `      "technical_requirements": ["software/API 1", "data structure 2", "..."],\n` +
-      `      "effort": "Low|Medium|High",\n` +
-      `      "dev_hours": 24,\n` +
-      `      "ttd_days": 14,\n` +
-      `      "roi_summary": "Qualitative ROI — what improves and how",\n` +
-      `      "roi_quantitative": "Optional rough $/% impact",\n` +
-      `      "tier": 1\n` +
-      `    }\n` +
-      `  ]\n` +
-      `}\n\n` +
-      `Produce 6-10 optimization matrix items, well-distributed across tiers (at least 2 in each tier when reasonable). Be honest about effort.\n\n` +
-      `IMPORTANT: Translate the audit's priority_fixes into matrix items where appropriate. SMB-grade SEO/website/branding/social fixes are exactly the kind of quotable, fast-payback work that closes the engagement — represent them concretely.`
+    /* ── Stage 3: Analyze (SWOT + Matrix, informed by audit) ───── */
+    if (current === 'analyze') {
+      stage = 'analyze'
+      const dossier = pstate.dossier
+      const digitalAudit = pstate.digital_audit
+      if (!dossier || !digitalAudit) throw new Error('Missing artifacts for analyze stage')
 
-    const analyze = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 8192,
-      system: ANALYZE_SYSTEM,
-      messages: [{ role: 'user', content: analyzePrompt }],
-    })
+      const analyzePrompt =
+        `Produce the full optimization report from this research dossier and digital presence audit.\n\n` +
+        `RESEARCH DOSSIER:\n${JSON.stringify(dossier)}\n\n` +
+        `DIGITAL PRESENCE AUDIT:\n${JSON.stringify(digitalAudit)}\n\n` +
+        (context ? `ENGAGEMENT CONTEXT: ${context}\n\n` : '') +
+        `Return ONLY this JSON object:\n` +
+        `{\n` +
+        `  "exec_summary": {\n` +
+        `    "company_overview": "2-3 sentences",\n` +
+        `    "value_proposition": "core value prop",\n` +
+        `    "market_trends": ["..."],\n` +
+        `    "competitors": [{ "name": "...", "positioning": "...", "url": "https://..." }],\n` +
+        `    "relative_positioning": "..."\n` +
+        `  },\n` +
+        `  "swot": {\n` +
+        `    "strengths":     [{ "point": "short label", "detail": "1-2 sentence explanation" }],\n` +
+        `    "weaknesses":    [{ "point": "...", "detail": "..." }],\n` +
+        `    "opportunities": [{ "point": "...", "detail": "..." }],\n` +
+        `    "threats":       [{ "point": "...", "detail": "..." }]\n` +
+        `  },\n` +
+        `  "optimization_matrix": [\n` +
+        `    {\n` +
+        `      "title": "Concise solution title",\n` +
+        `      "problem": "The underlying gap being addressed (anchored to a SWOT weakness/opportunity)",\n` +
+        `      "solution": "Detailed description of the fix — automation, AI tooling, SaaS, etc.",\n` +
+        `      "technical_requirements": ["software/API 1", "data structure 2", "..."],\n` +
+        `      "effort": "Low|Medium|High",\n` +
+        `      "dev_hours": 24,\n` +
+        `      "ttd_days": 14,\n` +
+        `      "roi_summary": "Qualitative ROI — what improves and how",\n` +
+        `      "roi_quantitative": "Optional rough $/% impact",\n` +
+        `      "tier": 1\n` +
+        `    }\n` +
+        `  ]\n` +
+        `}\n\n` +
+        `Produce 6-7 optimization matrix items, well-distributed across tiers (at least 2 in each tier when reasonable). Be honest about effort.\n` +
+        `BREVITY (critical — the response must be complete valid JSON): keep "problem" ≤ 1 sentence, "solution" ≤ 2 sentences, "roi_summary" ≤ 1 sentence, and ≤ 4 technical_requirements per item. SWOT detail ≤ 1 sentence each.\n\n` +
+        `IMPORTANT: Translate the audit's priority_fixes into matrix items where appropriate. SMB-grade SEO/website/branding/social fixes are exactly the kind of quotable, fast-payback work that closes the engagement — represent them concretely.`
 
-    const analyzeText = collectText(analyze)
-    const parsedAnalysis = extractJson(analyzeText) as AnalysisJson | null
-    if (!parsedAnalysis) throw new Error('Could not parse analysis JSON')
+      const analyze = await anthropic.messages.create({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 6144,
+        system: ANALYZE_SYSTEM,
+        messages: [{ role: 'user', content: analyzePrompt }],
+      })
 
-    /* ── Stage 3: Pricing (deterministic) ───────────────────────── */
+      const analyzeText = collectText(analyze)
+      const parsedAnalysis = extractJson(analyzeText) as AnalysisJson | null
+      if (!parsedAnalysis) throw new Error('Could not parse analysis JSON')
+
+      pstate.analysis = parsedAnalysis
+      await admin.from('forge_analyses')
+        .update({ status: 'pricing', progress: 85, pipeline_state: pstate })
+        .eq('id', analysisId)
+
+      return json({ stage: 'analyze', next: 'pricing' }, 202, headers)
+    }
+
+    /* ── Stage 4: Pricing (deterministic, no LLM) ──────────────── */
     stage = 'pricing'
-    await supabaseAdmin.from('forge_analyses')
-      .update({ status: 'pricing', progress: 85 })
-      .eq('id', analysisId)
+    const dossier = pstate.dossier
+    const digitalAudit = pstate.digital_audit
+    const parsedAnalysis = pstate.analysis
+    if (!dossier || !digitalAudit || !parsedAnalysis) {
+      throw new Error('Missing artifacts for pricing stage')
+    }
 
-    const { data: rate } = await supabaseAdmin
+    const { data: rate } = await admin
       .from('forge_rate_card')
       .select('*')
       .eq('user_id', user.id)
@@ -427,17 +485,18 @@ Deno.serve(async (req) => {
     }
 
     stage = 'persist'
-    await supabaseAdmin.from('forge_analyses')
+    await admin.from('forge_analyses')
       .update({
         status: 'complete',
         progress: 100,
         report: finalReport,
         error: null,
+        pipeline_state: null,
         updated_at: new Date().toISOString(),
       })
       .eq('id', analysisId)
 
-    return json({ success: true }, 200, headers)
+    return json({ stage: 'pricing', status: 'complete' }, 200, headers)
   } catch (err) {
     if (err instanceof RateLimitError) {
       return json({ error: err.message }, 429, headers)
@@ -448,9 +507,9 @@ Deno.serve(async (req) => {
     const publicMsg = err instanceof Error ? err.message : 'Forge failed'
     console.error('forge-analyze error:', detail)
     logAppIssue({ fn: 'forge-analyze', stage, detail })
-    if (supabaseAdmin && analysisId) {
+    if (admin && analysisId) {
       try {
-        await supabaseAdmin.from('forge_analyses')
+        await admin.from('forge_analyses')
           .update({ status: 'error', error: publicMsg.slice(0, 500), updated_at: new Date().toISOString() })
           .eq('id', analysisId)
       } catch (_) { /* swallow */ }

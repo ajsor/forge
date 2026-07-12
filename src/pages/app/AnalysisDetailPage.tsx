@@ -88,11 +88,23 @@ export default function AnalysisDetailPage() {
     setRunning(true)
     setError(null)
     try {
-      await callEdgeFunction<{ success: boolean }>('forge-analyze', { analysis_id: analysisId })
-      const { data } = await supabase.from('forge_analyses').select('*').eq('id', analysisId).maybeSingle()
-      if (data) setA(data as Analysis)
+      // The pipeline runs one stage per invocation (each stays under the edge
+      // wall-clock limit). Re-invoke for the next stage until the report is
+      // complete, refreshing the row between stages so the progress bar moves.
+      for (let i = 0; i < 6; i++) {
+        const res = await callEdgeFunction<{ status?: string; done?: boolean }>(
+          'forge-analyze',
+          { analysis_id: analysisId },
+        )
+        const { data } = await supabase.from('forge_analyses').select('*').eq('id', analysisId).maybeSingle()
+        if (data) setA(data as Analysis)
+        const status = (data as Analysis | null)?.status
+        if (res?.status === 'complete' || res?.done || status === 'complete' || status === 'error') break
+      }
     } catch (err) {
       setError(friendlyError(err))
+      const { data } = await supabase.from('forge_analyses').select('*').eq('id', analysisId).maybeSingle()
+      if (data) setA(data as Analysis)
     } finally {
       setRunning(false)
     }

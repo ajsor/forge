@@ -167,6 +167,12 @@ Then sums per tier and applies the bundle discount to produce the SOW totals.
 
 ## Changelog
 
+### 2026-07-12 — Fix: pipeline reliably completes (per-stage state machine)
+- **Root cause:** the old `forge-analyze` ran research + two web-search calls + analysis in ONE invocation, which blew past Supabase's ~150s edge worker wall-clock limit and got killed mid-run (repro: died at `auditing`, later `analyzing`). `EdgeRuntime.waitUntil` background execution did **not** help — the same worker ceiling kills background tasks too, and server-side self-chaining (`waitUntil(fetch(nextStage))`) proved unreliable (a worker spawned by an abandoned internal connection is torn down before its own chain fetch fires).
+- **Fix:** `forge-analyze` is now a **per-stage state machine** — each invocation runs exactly ONE Claude-backed stage (research → audit → analyze → pricing), persists its artifact to the new **`pipeline_state` JSONB** column (**migration 008**), advances `status`, and returns. The **frontend drives the chain**: `runAnalyze()` in `AnalysisDetailPage` loops, calling `forge-analyze` once per stage until `status==='complete'`. Each stage stays well under the wall-clock limit; the state cursor makes it idempotent and retry-safe (a retry from `error`/mid-stage resumes cleanly). Rate-limit is enforced only on the initial start.
+- Analyze stage tuned to avoid `WORKER_RESOURCE_LIMIT` (memory): `max_tokens` 8192→6144, compact (non-pretty) dossier/audit JSON in the prompt, and explicit brevity constraints so the JSON completes without truncation.
+- **Requires migration 008 + redeploy of `forge-analyze` + the frontend.** Verified end-to-end to `complete` (7 matrix items, deterministic pricing) 2026-07-12.
+
 ### 2026-07-11 — Security hardening + SOW features
 - **Share-link enumeration fixed:** anon SELECT on `forge_share_links` (no slug predicate, so every active report/brand snapshot was downloadable) replaced with the `forge_share_link_get` SECURITY DEFINER RPC keyed on the full slug (**migration 005**); public viewer reads one row. `forge-analyze` no longer returns/stores stack traces (message only) and is rate-limited via shared `ai_usage_events` (**migration 006**).
 - **Editable optimization matrix:** an "Edit plan" mode retitles / retiers / adjusts hours / removes line items with a live deterministically-recomputed total (`src/lib/pricing.ts` mirrors the edge pricing math).
