@@ -48,11 +48,15 @@ The LLM only estimates **dev hours per line item** — never dollar figures. For
 - [x] Editable rate card with tier multipliers and bundle discount
 - [x] Public share links with brand+report snapshots (immutable at publish-time)
 - [x] PDF export via browser print stylesheet
-- [x] Recon integration — "Send to Forge" button on Recon brief detail page
+- [x] Recon integration — "Send to Forge" button on Recon brief detail page; Recon-brief picker on the New Analysis form
 - [x] Portal feature flag `forge`
-- [ ] Stripe checkout button on share links (future)
+- [x] Editable optimization matrix items (regenerate / tweak hours)
+- [x] Recon hydration carries known pain points, objections, and post-meeting notes into the dossier (not just snapshot/signals)
+- [x] Deal notes + AI-drafted follow-up email
+- [x] Account grouping and opt-in team sharing on the Analyses list
+- [x] Share-link view timestamps (first/last viewed) surfaced on the analysis and list
+- [ ] Stripe checkout button + webhook-driven deposit-paid status (future — needs Stripe account wiring)
 - [ ] Brand-owned custom subdomain for share links (future — currently shared domain only)
-- [ ] Editable optimization matrix items (regenerate / tweak hours)
 
 ## Project Structure
 
@@ -76,8 +80,8 @@ forge/
 │   ├── main.tsx
 │   └── index.css
 ├── supabase/
-│   ├── migrations/{001_forge_schema, 002_forge_rls, 003_forge_view_count_rpc}.sql
-│   └── functions/forge-analyze/index.ts
+│   ├── migrations/001-011 (schema, RLS, view count, status/auditing, share-link get, rate limit, brand payment, pipeline state, deal notes, shared, view tracking)
+│   └── functions/{forge-analyze,forge-followup}/index.ts
 └── project.md
 ```
 
@@ -89,16 +93,19 @@ Shared Supabase project `hrxrzpltwcndhpvfwkdm`; all tables RLS-scoped to `auth.u
 |-------|---------|
 | `forge_brands` | White-label brand templates (logo, colors, contact, legal entity, cover letter). One default per user. |
 | `forge_rate_card` | Per-user pricing inputs: hourly rate, currency, tier multipliers, bundle discount %. One row per user. |
-| `forge_analyses` | One row per analysis — target, context, brand, status, full report JSONB, progress, sources. Soft-links to `recon_briefs(id)` via `recon_brief_id` when seeded from Recon. |
-| `forge_share_links` | Public, anonymous-readable share links. Stores **immutable snapshots** of brand + report at publish time so subsequent edits don't change what the prospect sees. View count bumped via the `forge_share_link_view(slug)` SECURITY DEFINER RPC. |
+| `forge_analyses` | One row per analysis — target, context, brand, status, full report JSONB, progress, sources, notes (deal outcome), shared. Soft-links to `recon_briefs(id)` via `recon_brief_id` when seeded from Recon. |
+| `forge_share_links` | Public, anonymous-readable share links. Stores **immutable snapshots** of brand + report at publish time so subsequent edits don't change what the prospect sees. `view_count`/`first_viewed_at`/`last_viewed_at` bumped via the `forge_share_link_get(slug)` SECURITY DEFINER RPC. |
+
+`shared` defaults `false`; a permissive SELECT policy (migration 010) exposes `shared = true` analyses to other users, but only those holding the `forge` feature flag (checked via `user_feature_flags`/`feature_flags`) — not every authenticated user on the shared project. INSERT/UPDATE/DELETE stay owner-only; a non-owner viewing a shared analysis sees a read-only report (no edit/publish/retry controls, no auto-run of the pipeline).
 
 ## Edge Function
 
 | Function | Purpose | Secrets used |
 |----------|---------|--------------|
-| `forge-analyze` | Runs the full pipeline: research (web search or recon hydration) → analyze (SWOT + Optimization Matrix via Claude) → deterministic pricing (rate card). Updates `forge_analyses.status` + `progress` so the UI can show a live progress bar. | `ANTHROPIC_API_KEY`, `SUPABASE_*` |
+| `forge-analyze` | Runs the full pipeline: research (web search or Recon hydration) → audit → analyze (SWOT + Optimization Matrix via Claude) → deterministic pricing (rate card). When hydrating from a Recon brief, also carries over `likely_pains`, `objection_prep`, and post-meeting `notes` as `known_pain_points`/`known_objections`/`known_context` — treated as verified ground truth, not inference. Updates `forge_analyses.status` + `progress` so the UI can show a live progress bar. | `ANTHROPIC_API_KEY`, `SUPABASE_*` |
+| `forge-followup` | Drafts a follow-up email from an analysis's deal notes + share-link view status (no web search, not persisted — returned directly to the client) | `ANTHROPIC_API_KEY`, `SUPABASE_*` |
 
-Verifies the caller's Supabase JWT, confirms analysis ownership, CORS-locked to `https://forge.stonecode.ai` in prod (+ localhost in dev). On failure it stamps `status='error'` so the UI can offer a retry.
+Both verify the caller's Supabase JWT, confirm analysis ownership, CORS-lock to `https://forge.stonecode.ai` (+ localhost in dev), and are rate-limited via the shared `ai_usage_events` table. `forge-analyze` failure stamps `status='error'` so the UI can offer a retry.
 
 ## Portal integration
 
@@ -166,6 +173,16 @@ For each optimization matrix item the LLM produces, Forge computes:
 Then sums per tier and applies the bundle discount to produce the SOW totals.
 
 ## Changelog
+
+### 2026-07-22 — Recon parity: dossier fix, deal notes, sharing, view tracking
+- **Fixed a real gap in Recon hydration:** `adaptReconBriefToDossier` previously discarded a linked Recon brief's `likely_pains` and `objection_prep`, and had no way to see the brief's post-meeting `notes` (added to Recon the same day). Now all three flow into the dossier as `known_pain_points`/`known_objections`/`known_context`, and the analyze-stage system prompt instructs Claude to treat them as verified ground truth (not inference) when building the SWOT and optimization matrix.
+- **Recon-brief picker:** the New Analysis form's "Seed from Recon brief" field was a raw UUID paste box — replaced with a dropdown of the user's own completed Recon briefs by company name.
+- **Deal notes + follow-up drafter:** free-text notes field on an analysis (owner-only edit) for call outcomes/objections/negotiation status; new `forge-followup` edge function drafts a short follow-up email from those notes plus the report and share-link view status. Shown in a modal with copy-to-clipboard, not persisted.
+- **Team sharing:** owner-only "Share with team" toggle (`shared` column, **migration 010**) plus a Mine/Team tab on the Analyses list. RLS scopes visibility to users who hold the `forge` feature flag, not every authenticated user on the shared Supabase project. A non-owner viewing a shared analysis gets a read-only report — no edit/publish/retry controls, and the pipeline auto-run is gated to the owner so a viewer can't trigger billed AI work on someone else's analysis.
+- **Account grouping:** "Group by account" toggle on the Analyses list, same as Recon.
+- **Share-link view tracking:** `first_viewed_at`/`last_viewed_at` columns (**migration 011**) on `forge_share_links`, set by `forge_share_link_get`. The analysis detail page shows "last viewed …"; the Analyses list shows a "Viewed Xh ago" badge per analysis.
+- Deliberately not done — flagged as needing Stripe wiring: a webhook-driven deposit-paid status separate from the AI pipeline's `status` field.
+- Requires migrations 009+010+011 and redeploy of `forge-analyze` (both applied/deployed) + new `forge-followup` deploy (done).
 
 ### 2026-07-12 — Fix: pipeline reliably completes (per-stage state machine)
 - **Root cause:** the old `forge-analyze` ran research + two web-search calls + analysis in ONE invocation, which blew past Supabase's ~150s edge worker wall-clock limit and got killed mid-run (repro: died at `auditing`, later `analyzing`). `EdgeRuntime.waitUntil` background execution did **not** help — the same worker ceiling kills background tasks too, and server-side self-chaining (`waitUntil(fetch(nextStage))`) proved unreliable (a worker spawned by an abandoned internal connection is torn down before its own chain fetch fires).

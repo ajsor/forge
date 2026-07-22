@@ -33,6 +33,7 @@ export default function AnalysisDetailPage() {
   const [running, setRunning] = useState(false)
   const [publishExpiryDays, setPublishExpiryDays] = useState(0)
   const startedRef = useRef(false)
+  const isOwner = !!user && !!a && user.id === a.user_id
 
   // Edit-plan state
   const [editing, setEditing] = useState(false)
@@ -61,15 +62,16 @@ export default function AnalysisDetailPage() {
     return () => { cancelled = true }
   }, [analysisId])
 
-  // Auto-trigger analyze on a freshly-pending row
+  // Auto-trigger analyze on a freshly-pending row (owner only — a shared
+  // viewer must never be able to kick off billed AI work on someone else's analysis)
   useEffect(() => {
-    if (!a || running || startedRef.current) return
+    if (!a || !isOwner || running || startedRef.current) return
     if (a.status === 'pending') {
       startedRef.current = true
       void runAnalyze()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [a?.id, a?.status])
+  }, [a?.id, a?.status, isOwner])
 
   // Poll while running
   useEffect(() => {
@@ -262,7 +264,7 @@ export default function AnalysisDetailPage() {
         </div>
 
         <div className="flex items-center gap-2 flex-wrap">
-          {a.status === 'complete' && !editing && (
+          {a.status === 'complete' && !editing && isOwner && (
             <>
               <button onClick={startEdit} style={btnSecondary}>
                 <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -289,17 +291,20 @@ export default function AnalysisDetailPage() {
                 </svg>
                 Publish share link
               </button>
-              <button onClick={printPdf} style={btnSecondary}>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <polyline points="6 9 6 2 18 2 18 9" />
-                  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
-                  <rect x="6" y="14" width="12" height="8" />
-                </svg>
-                Print / Save PDF
-              </button>
+              <ShareToggle analysis={a} onChange={(shared) => setA((cur) => (cur ? { ...cur, shared } : cur))} />
             </>
           )}
-          {a.status === 'error' && (
+          {a.status === 'complete' && !editing && (
+            <button onClick={printPdf} style={btnSecondary}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="6 9 6 2 18 2 18 9" />
+                <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+                <rect x="6" y="14" width="12" height="8" />
+              </svg>
+              Print / Save PDF
+            </button>
+          )}
+          {a.status === 'error' && isOwner && (
             <button onClick={runAnalyze} disabled={running} style={btnPrimary}>
               {running ? 'Retrying…' : 'Retry'}
             </button>
@@ -327,7 +332,7 @@ export default function AnalysisDetailPage() {
       )}
 
       {/* Share links */}
-      {shareLinks.length > 0 && !editing && (
+      {shareLinks.length > 0 && !editing && isOwner && (
         <div className="no-print rounded-2xl p-5" style={{ background: '#111722', border: '1px solid rgba(255,255,255,0.06)' }}>
           <div style={{ fontSize: 12, textTransform: 'uppercase', letterSpacing: '0.08em', color: '#5f6b7e', marginBottom: 10 }}>
             Share links
@@ -358,8 +363,10 @@ export default function AnalysisDetailPage() {
                     {l.is_active ? 'Disable' : 'Enable'}
                   </button>
                   <button onClick={() => deleteLink(l.id)} style={{ ...btnTinySecondary, color: '#fb7185' }}>Delete</button>
-                  <span style={{ fontSize: 11, color: expired ? '#fb7185' : '#5f6b7e' }}>
-                    {l.view_count} views{l.expires_at ? (expired ? ' · expired' : ` · expires ${new Date(l.expires_at).toLocaleDateString()}`) : ''}
+                  <span style={{ fontSize: 11, color: expired ? '#fb7185' : l.view_count > 0 ? '#34d399' : '#5f6b7e' }}>
+                    {l.view_count} views
+                    {l.last_viewed_at ? ` · last viewed ${new Date(l.last_viewed_at).toLocaleString()}` : ''}
+                    {l.expires_at ? (expired ? ' · expired' : ` · expires ${new Date(l.expires_at).toLocaleDateString()}`) : ''}
                   </span>
                 </div>
               )
@@ -433,6 +440,166 @@ export default function AnalysisDetailPage() {
       {a.report && !editing && (
         <div className="rounded-2xl" style={{ background: '#0d1219', border: '1px solid rgba(255,255,255,0.06)', padding: 24 }}>
           <ReportView report={a.report} brand={brand} companyName={a.company_name} sources={a.sources} preview />
+        </div>
+      )}
+
+      {a.report && !editing && (
+        <DealNotesAndFollowup analysis={a} isOwner={isOwner} onNotesChange={(notes) => setA((cur) => (cur ? { ...cur, notes } : cur))} />
+      )}
+    </div>
+  )
+}
+
+function ShareToggle({ analysis, onChange }: { analysis: Analysis; onChange: (shared: boolean) => void }) {
+  const [saving, setSaving] = useState(false)
+  const toggle = async () => {
+    setSaving(true)
+    const next = !analysis.shared
+    const { error } = await supabase.from('forge_analyses').update({ shared: next }).eq('id', analysis.id)
+    setSaving(false)
+    if (!error) onChange(next)
+  }
+  return (
+    <button
+      onClick={toggle}
+      disabled={saving}
+      title="Let teammates with Forge access see this analysis"
+      style={{
+        ...btnSecondary,
+        background: analysis.shared ? 'rgba(196,181,253,0.14)' : 'transparent',
+        borderColor: analysis.shared ? 'rgba(196,181,253,0.4)' : 'rgba(255,255,255,0.12)',
+        color: analysis.shared ? '#c4b5fd' : '#cbd5e1',
+      }}
+    >
+      {analysis.shared ? 'Shared with team' : 'Share with team'}
+    </button>
+  )
+}
+
+function DealNotesAndFollowup({
+  analysis,
+  isOwner,
+  onNotesChange,
+}: {
+  analysis: Analysis
+  isOwner: boolean
+  onNotesChange: (notes: string | null) => void
+}) {
+  const [notes, setNotes] = useState(analysis.notes ?? '')
+  const [saving, setSaving] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const [followup, setFollowup] = useState<{ open: boolean; loading: boolean; draft: string; error: string | null }>({
+    open: false,
+    loading: false,
+    draft: '',
+    error: null,
+  })
+
+  const saveNotes = async () => {
+    setSaving(true)
+    setSaved(false)
+    const trimmed = notes.trim()
+    const { error } = await supabase.from('forge_analyses').update({ notes: trimmed || null }).eq('id', analysis.id)
+    setSaving(false)
+    if (!error) {
+      onNotesChange(trimmed || null)
+      setSaved(true)
+      setTimeout(() => setSaved(false), 1800)
+    }
+  }
+
+  const draftFollowup = async () => {
+    setFollowup({ open: true, loading: true, draft: '', error: null })
+    try {
+      const result = await callEdgeFunction<{ draft: string }>('forge-followup', { analysis_id: analysis.id })
+      setFollowup({ open: true, loading: false, draft: result.draft, error: null })
+    } catch (e) {
+      setFollowup({ open: true, loading: false, draft: '', error: e instanceof EdgeFunctionError ? e.message : 'Failed to draft follow-up.' })
+    }
+  }
+
+  if (!isOwner && !analysis.notes) return null
+
+  return (
+    <div className="no-print rounded-2xl p-6" style={{ background: '#111722', border: '1px solid rgba(255,255,255,0.06)' }}>
+      <div className="flex items-center justify-between flex-wrap gap-2 mb-3">
+        <h2 style={{ fontFamily: 'Sora, sans-serif', fontSize: 12, fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.1em', color: '#9aa6b8' }}>
+          Deal notes
+        </h2>
+        {isOwner && notes.trim() && (
+          <button onClick={draftFollowup} style={{ ...btnTinySecondary, color: '#93c5fd', borderColor: 'rgba(96,165,250,0.3)', background: 'rgba(96,165,250,0.12)' }}>
+            Draft follow-up email
+          </button>
+        )}
+      </div>
+      {isOwner ? (
+        <>
+          <textarea
+            value={notes}
+            onChange={(e) => setNotes(e.target.value)}
+            maxLength={2000}
+            rows={4}
+            placeholder="What happened after you sent this? Objections raised, negotiation status, next steps agreed — this feeds the follow-up drafter."
+            className="w-full rounded-xl px-3.5 py-3 text-sm leading-relaxed outline-none resize-y"
+            style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.08)', color: '#e6ebf2' }}
+          />
+          <div className="flex items-center gap-3 mt-2">
+            <button
+              onClick={saveNotes}
+              disabled={saving || notes === (analysis.notes ?? '')}
+              style={{
+                ...btnTinySecondary,
+                background: notes === (analysis.notes ?? '') ? 'transparent' : 'rgba(96,165,250,0.16)',
+                borderColor: notes === (analysis.notes ?? '') ? 'rgba(255,255,255,0.1)' : 'rgba(96,165,250,0.35)',
+                color: notes === (analysis.notes ?? '') ? '#5f6b7e' : '#93c5fd',
+              }}
+            >
+              {saving ? 'Saving…' : 'Save notes'}
+            </button>
+            {saved && <span style={{ fontSize: 12, color: '#34d399' }}>Saved</span>}
+          </div>
+        </>
+      ) : (
+        <p style={{ fontSize: 13.5, color: '#d4dae3', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{analysis.notes}</p>
+      )}
+
+      {followup.open && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4"
+          style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}
+          onClick={() => setFollowup((f) => ({ ...f, open: false }))}
+        >
+          <div
+            className="w-full max-w-lg rounded-2xl p-5"
+            style={{ background: '#111722', border: '1px solid rgba(96,165,250,0.22)' }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ fontFamily: 'Sora, sans-serif', fontSize: 16, fontWeight: 700, marginBottom: 12 }}>Follow-up draft</h3>
+            {followup.loading ? (
+              <p style={{ fontSize: 13, color: '#5f6b7e' }}>Drafting…</p>
+            ) : followup.error ? (
+              <p style={{ fontSize: 13, color: '#fb7185' }}>{followup.error}</p>
+            ) : (
+              <>
+                <textarea
+                  readOnly
+                  value={followup.draft}
+                  rows={9}
+                  className="w-full rounded-xl px-3.5 py-3 text-sm leading-relaxed outline-none resize-y"
+                  style={{ background: 'rgba(0,0,0,0.3)', border: '1px solid rgba(255,255,255,0.08)', color: '#e6ebf2' }}
+                />
+                <div className="flex justify-end gap-2 mt-3">
+                  <button onClick={() => setFollowup((f) => ({ ...f, open: false }))} style={btnTinySecondary}>Close</button>
+                  <button
+                    onClick={() => navigator.clipboard.writeText(followup.draft)}
+                    style={{ ...btnTinySecondary, background: 'rgba(96,165,250,0.16)', borderColor: 'rgba(96,165,250,0.35)', color: '#93c5fd' }}
+                  >
+                    Copy
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       )}
     </div>

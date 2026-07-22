@@ -177,6 +177,10 @@ export interface Analysis {
   /** Progress within the active stage, 0-100 */
   progress: number
   error: string | null
+  /** Deal/outcome notes the owner adds after sending the report (call notes, objections, negotiation status) */
+  notes: string | null
+  /** Opt-in team visibility — see forge_analyses_select_shared RLS policy */
+  shared: boolean
   created_at: string
   updated_at: string
 }
@@ -248,6 +252,8 @@ export interface ShareLink {
   company_name: string | null
   is_active: boolean
   view_count: number
+  first_viewed_at: string | null
+  last_viewed_at: string | null
   expires_at: string | null
   created_at: string
 }

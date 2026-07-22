@@ -90,6 +90,8 @@ EFFORT BUCKETS (must match exactly):
 
 ASSIGN TIER consistent with effort. Tier-1 items must be Low effort. Tier-3 items must be High effort.
 
+If the research dossier includes "known_pain_points", "known_objections", or "known_context" — these came from an actual sales conversation with the prospect (via Recon), not inference. Treat them as verified ground truth and weight them over anything you'd otherwise guess: a known pain point should map directly to a SWOT weakness and likely an optimization matrix item; a known objection should shape how you frame relative_positioning or which items you prioritize.
+
 Your FINAL message must be ONLY a single valid JSON object — no preamble, no markdown fencing, no commentary after.`
 
 /* ── Types (matching forge frontend src/types.ts) ─────────────────── */
@@ -106,6 +108,12 @@ interface ResearchDossier {
   ai_disruption_vectors: string[]
   customer_sentiment: string[]
   sources: { title: string; url: string }[]
+  /** From a linked Recon brief's likely_pains — verified-ish hypotheses, not guesses. */
+  known_pain_points?: string[]
+  /** From a linked Recon brief's objection_prep. */
+  known_objections?: { objection: string; response: string }[]
+  /** From a linked Recon brief's post-meeting notes — what actually happened. */
+  known_context?: string
 }
 
 interface OptimizationMatrixRaw {
@@ -271,12 +279,12 @@ Deno.serve(async (req) => {
       if (row.recon_brief_id) {
         const { data: brief } = await admin
           .from('recon_briefs')
-          .select('company_name, brief, sources')
+          .select('company_name, brief, sources, notes')
           .eq('id', row.recon_brief_id)
           .eq('user_id', user.id)
           .maybeSingle()
         if (brief?.brief) {
-          dossier = adaptReconBriefToDossier(brief.company_name, brief.brief, brief.sources)
+          dossier = adaptReconBriefToDossier(brief.company_name, brief.brief, brief.sources, brief.notes)
         }
       }
 
@@ -524,9 +532,12 @@ function adaptReconBriefToDossier(
   companyName: string | null,
   brief: Record<string, unknown>,
   sources: unknown,
+  notes: unknown,
 ): ResearchDossier {
   const get = <T>(k: string, fallback: T): T => (brief?.[k] as T) ?? fallback
   const signals = get<Array<{ title?: string; detail?: string }>>('signals', [])
+  const pains = get<unknown[]>('likely_pains', [])
+  const objections = get<Array<{ objection?: string; response?: string }>>('objection_prep', [])
   return {
     company_name: companyName || String(get('company_name', '')) || '',
     snapshot: String(get('snapshot', '')),
@@ -543,6 +554,14 @@ function adaptReconBriefToDossier(
           .map((s) => ({ title: String(s.title ?? ''), url: String(s.url ?? '') }))
           .filter((s) => /^https?:\/\//i.test(s.url))
       : [],
+    known_pain_points: Array.isArray(pains) ? pains.filter((p): p is string => typeof p === 'string' && p.length > 0).slice(0, 6) : [],
+    known_objections: Array.isArray(objections)
+      ? objections
+          .filter((o) => o && (o.objection || o.response))
+          .map((o) => ({ objection: String(o.objection ?? ''), response: String(o.response ?? '') }))
+          .slice(0, 6)
+      : [],
+    known_context: typeof notes === 'string' && notes.trim() ? notes.trim().slice(0, 2000) : undefined,
   }
 }
 
