@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { Link, useParams } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import { supabase, callEdgeFunction, EdgeFunctionError } from '../../lib/supabase'
@@ -563,7 +564,11 @@ function DealNotesAndFollowup({
         <p style={{ fontSize: 13.5, color: '#d4dae3', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>{analysis.notes}</p>
       )}
 
-      {followup.open && (
+      {followup.open && createPortal(
+        // Portaled to document.body: AnalysisDetailPage renders inside AppLayout's
+        // <main class="relative z-10">, which traps a `fixed z-50` descendant below
+        // AppLayout's `sticky z-30` header — fixed escapes layout, not stacking
+        // context. Confirmed by browser-testing the equivalent Recon modal.
         <div
           className="fixed inset-0 z-50 flex items-center justify-center p-4"
           style={{ background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(8px)' }}
@@ -600,7 +605,8 @@ function DealNotesAndFollowup({
               </>
             )}
           </div>
-        </div>
+        </div>,
+        document.body,
       )}
     </div>
   )
